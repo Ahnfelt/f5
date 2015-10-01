@@ -70,7 +70,6 @@ start configuration = do
     putStrLn $ "Listening on port " ++ show (cPort configuration)
     run (cPort configuration) (app configuration)
 
--- Check if it's a directory and serve the appropriate subpath instead
 fileHandler fileName request = do
     isDirectory <- doesDirectoryExist fileName
     let path = S.unpack (rawPathInfo request)
