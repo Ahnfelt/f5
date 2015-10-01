@@ -1,18 +1,20 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
--- Consider using: https://github.com/fpco/http-reverse-proxy
-
-import Network.Wai (responseLBS, Application, Request (..))
+import Network.Wai (responseLBS, Application, responseFile, Request (..))
 import Network.Wai.Handler.Warp (run)
 import Network.HTTP.Types (status200, status302)
 import Network.HTTP.Types.Header (hContentType)
 import Network.HTTP.ReverseProxy
 import Network.HTTP.Conduit (newManager, tlsManagerSettings)
 import qualified Data.ByteString.Char8 as S
+import qualified Data.ByteString.Lazy.Char8 as L
 import Control.Monad.IO.Class (liftIO)
 import System.Environment
 import System.Exit
+import System.Process (shell, readCreateProcessWithExitCode)
+import Data.List
+import Data.Char (isDigit)
 
 data Configuration = Configuration {
     cPort :: Int,
@@ -60,41 +62,56 @@ main = do
             putStrLn ""
             die "ERROR: Wrong number of arguments."
     print configuration
-    start (cPort configuration)
+    start configuration
 
-start port = do
-    putStrLn $ "Listening on port " ++ show port
-    let destination = ProxyDest "www.example.com" 80
-    run port (proxy2 destination)
+start configuration = do
+    putStrLn $ "Listening on port " ++ show (cPort configuration)
+    run (cPort configuration) (app configuration)
 
-handler destination@(ProxyDest host port) request = do
-    -- WPRResponse WAI.Response
-    let host' = S.pack (S.unpack host ++ (if port == 80 then "" else ":" ++ show port))
+-- Check if it's a directory and serve the appropriate subpath instead
+fileHandler fileName request = do
+    return $ WPRResponse $ responseFile status200 [(hContentType, "text/html")] fileName Nothing
+
+destinationHandler host port request = do
+    let host' = host ++ (if port == 80 then "" else ":" ++ show port)
     let headers' = filter (\(k, v) -> k /= "Host") (requestHeaders request)
-    let header = ("Host", host')
+    let header = ("Host", S.pack host')
     let headers'' = header : headers'
     let request' = request { requestHeaders = headers'' }
-    return (WPRModifiedRequest request' destination)
-   
---proxy2 :: Request -> ResourceT IO Response
-proxy2 destination req sendResponse = do
+    return (WPRModifiedRequest request' (ProxyDest (S.pack host) port))
+
+delegateHandler configuration request = do
+    let url = cUrl configuration
+    let clean n url = filter (/= '/') (drop n url)
+    let (http, hostPort) = 
+            if "http://" `isPrefixOf` url then (Just "http", clean 7 url)
+            else if "https://" `isPrefixOf` url then (Just "https", clean 8 url)
+            else if ":" `isInfixOf` url then (Just "http", clean 0 url)
+            else (Nothing, url)
+    let host = takeWhile (/= ':') hostPort
+    let port = reverse (takeWhile (/= ':') (reverse hostPort))
+    let port' = if ":" `isInfixOf` hostPort && all isDigit port then read port else 80
+    case http of
+        Just _ -> destinationHandler host port' request
+        Nothing -> fileHandler url request
+    
+exitHandler configuration exitCode stdout stderr = do
+    let html = "<html>" ++ (show (exitCode :: Int)) ++ "</html>"
+    return $ WPRResponse $ responseLBS status200 [(hContentType, "text/html")] (L.pack html)
+    
+handler configuration request = do
+    -- Check if the request matches the pattern and only call the command then
+    let process = shell (cCommand configuration)
+    (exitCode, stdout, stderr) <- readCreateProcessWithExitCode process ""
+    case exitCode of
+        ExitFailure code -> exitHandler configuration code stdout stderr
+        ExitSuccess -> delegateHandler configuration request
+  
+app configuration req sendResponse = do
     manager <- liftIO $ newManager tlsManagerSettings
     waiProxyToSettings
-        (handler destination)
-        def -- { wpsOnExc = onExc, wpsTimeout = Nothing}
+        (handler configuration)
+        def
         manager 
         req
         sendResponse 
-    where
-        onExc _ _ = return $ responseLBS
-            status200
-            [ ("content-type", "text/html")
-            , ("Refresh", "1")
-            ]
-            "<h1>App not ready, please refresh</h1>"    
-    
---app :: Application
---app request respond =
-    --respond $ do 
-        --responseLBS status200 [(hContentType, "text/plain")] "Hello world!"
-      --  responseLBS status302 [("Location", "http://www.google.com/"), (hContentType, "text/plain")] "Foo!"
