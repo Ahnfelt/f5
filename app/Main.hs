@@ -14,6 +14,7 @@ import Control.Monad.IO.Class (liftIO)
 import System.Environment
 import System.Exit
 import System.Process (shell, readCreateProcessWithExitCode)
+import System.Directory (doesDirectoryExist)
 import Data.List
 import Data.Char (isDigit)
 
@@ -71,7 +72,14 @@ start configuration = do
 
 -- Check if it's a directory and serve the appropriate subpath instead
 fileHandler fileName request = do
-    return $ WPRResponse $ responseFile status200 [(hContentType, "text/html")] fileName Nothing
+    isDirectory <- doesDirectoryExist fileName
+    let path = S.unpack (rawPathInfo request)
+    if not isDirectory || ".." `isInfixOf` path
+        then return $ WPRResponse $ responseFile status200 [(hContentType, "text/html")] fileName Nothing
+        else do
+            let suffix = if "/" `isSuffixOf` path then "index.html" else ""
+            let file = fileName ++ path ++ suffix
+            return $ WPRResponse $ responseFile status200 [(hContentType, "text/html")] file Nothing
 
 destinationHandler host port request = do
     let host' = host ++ (if port == 80 then "" else ":" ++ show port)
