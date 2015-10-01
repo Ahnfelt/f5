@@ -5,6 +5,7 @@ import Network.Wai (responseLBS, Application, responseFile, Request (..))
 import Network.Wai.Handler.Warp (run)
 import Network.HTTP.Types (status200, status302)
 import Network.HTTP.Types.Header (hContentType)
+import Network.HTTP.Types.Method (methodGet)
 import Network.HTTP.ReverseProxy
 import Network.HTTP.Conduit (newManager, tlsManagerSettings)
 import qualified Data.ByteString.Char8 as S
@@ -96,17 +97,27 @@ delegateHandler configuration request = do
         Nothing -> fileHandler url request
     
 exitHandler configuration exitCode stdout stderr = do
-    let html = "<html>" ++ (show (exitCode :: Int)) ++ "</html>"
+    -- TODO: Escaping, read script from URL
+    script <- case cErrorScriptUrl configuration of
+        Nothing -> return ""
+        Just f -> do
+            s <- readFile f
+            return ("<script>" ++ s ++ "</script>")
+    let html = "<html><head><title>Error while running command</title></head><body><code id=\"errorcode\">Error code: <span>" ++ (show (exitCode :: Int)) ++ "</span></code><br /><br /><pre id=\"stdout\">" ++ stdout ++ "</pre><br /><br /><pre id=\"stderr\" style=\"color: #a00000\">" ++ stderr ++ "</pre>" ++ script ++ "</html>"
     return $ WPRResponse $ responseLBS status200 [(hContentType, "text/html")] (L.pack html)
     
 handler configuration request = do
-    -- Check if the request matches the pattern and only call the command then
-    let process = shell (cCommand configuration)
-    (exitCode, stdout, stderr) <- readCreateProcessWithExitCode process ""
-    case exitCode of
-        ExitFailure code -> exitHandler configuration code stdout stderr
-        ExitSuccess -> delegateHandler configuration request
-  
+    -- TODO: Better check of the pattern
+    if requestMethod request == methodGet && rawPathInfo request == S.pack (cPattern configuration)
+        then do
+            putStrLn ("Running command: " ++ (cCommand configuration))
+            let process = shell (cCommand configuration)
+            (exitCode, stdout, stderr) <- readCreateProcessWithExitCode process ""
+            case exitCode of
+                ExitFailure code -> exitHandler configuration code stdout stderr
+                ExitSuccess -> delegateHandler configuration request
+        else delegateHandler configuration request
+
 app configuration req sendResponse = do
     manager <- liftIO $ newManager tlsManagerSettings
     waiProxyToSettings
